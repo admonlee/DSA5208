@@ -1,10 +1,12 @@
 
-import pandas, csv, argparse, numpy as np, time, random, datetime
+import csv, argparse, numpy as np, time, datetime
 from mpi4py import MPI
 
+# Convert datetime string to timestamp
 def parse_datetime(dt_str):
     return datetime.datetime.strptime(dt_str, '%m/%d/%Y %I:%M:%S %p').timestamp()
 
+# Read CSV in chunks and distribute rows to processes
 def read_csv(filename, comm, rank, size):
 
     features = ['tpep_pickup_datetime', 'tpep_dropoff_datetime', 'passenger_count', 'trip_distance',
@@ -23,7 +25,6 @@ def read_csv(filename, comm, rank, size):
     if rank == 0:
         buffer = []
         counter = 0
-        run_number = 0
 
         with open(filename, 'r') as csvfile:
             filereader = csv.reader(csvfile)
@@ -40,8 +41,7 @@ def read_csv(filename, comm, rank, size):
                 buffer.append(read_row)
                 counter += 1
                 if counter == chunk:
-                    run_number += 1
-                    print(f"Rank {rank} processed chunk {run_number}")
+                    # Convert to numpy array for efficient sending
                     buffer_array = np.array(buffer, dtype=np.float64)
                     if dest == rank:
                         append_data(buffer_array, x_train_local, y_train_local, x_test_local, y_test_local)
@@ -52,18 +52,20 @@ def read_csv(filename, comm, rank, size):
                         req = comm.isend(buffer_array, dest=dest, tag=0)
                         send_reqs.append(req)
                     dest = (dest + 1) % size
+                    # Reset buffer and counter
                     buffer = []
                     counter = 0
 
+            # Send remaining data in buffer at end of file
             if buffer:
-                buffer_array = np.array(buffer, dtype=np.float32)
+                buffer_array = np.array(buffer, dtype=np.float64)
                 if dest == rank:
                     append_data(buffer_array, x_train_local, y_train_local, x_test_local, y_test_local)
                 else:
                     req = comm.isend(buffer_array, dest=dest, tag=0)
                     send_reqs.append(req)
 
-            # Send end-of-data signal (None) to all non-root ranks
+            # Send end-of-data signal (None)
             for dest_rank in range(1, size):
                 comm.send(None, dest=dest_rank, tag=0)
 
@@ -77,16 +79,96 @@ def read_csv(filename, comm, rank, size):
                 break
             append_data(buffer_array, x_train_local, y_train_local, x_test_local, y_test_local)
 
-    return x_train_local, y_train_local, x_test_local, y_test_local
+    # Convert list of arrays to single arrays and return to main
+    X_train = np.vstack(x_train_local) if x_train_local else np.empty((0, len(features)-1))
+    X_test = np.vstack(x_test_local) if x_test_local else np.empty((0, len(features)-1))
+    # Add bias column (ones) to X_train and X_test
+    X_train = np.hstack([X_train, np.ones((X_train.shape[0], 1))])
+    X_test = np.hstack([X_test, np.ones((X_test.shape[0], 1))])
+    return (
+        X_train,
+        np.hstack(y_train_local) if y_train_local else np.empty(0),
+        X_test,
+        np.hstack(y_test_local) if y_test_local else np.empty(0)
+    )
 
-def append_data(buffer, x_train_local, y_train_local, x_test_local, y_test_local):
-    for row in buffer:
-        if random.random() < 0.7:
-            x_train_local.append(row[:-1])
-            y_train_local.append(row[-1]) 
-        else:
-            x_test_local.append(row[:-1])
-            y_test_local.append(row[-1])
+# Append data to local train/test sets
+def append_data(buffer_array, x_train_local, y_train_local, x_test_local, y_test_local):
+    
+    # Split into x and y
+    x = buffer_array[:, :-1]
+    y = buffer_array[:, -1]
+
+    # Random mask for train/test split
+    mask = np.random.rand(len(x)) < 0.7
+
+    x_train_local.extend(x[mask])
+    y_train_local.extend(y[mask])
+    x_test_local.extend(x[~mask])
+    y_test_local.extend(y[~mask])
+
+# Normalize training data to have zero mean and standard deviation of one
+def normalize_data(x_train_local, x_test_local, comm):
+
+    # Exclude last column (all 1 for bias) from normalization
+    features = x_train_local.shape[1] - 1
+    local_sum = x_train_local[:, :features].sum(axis=0)
+    local_count = x_train_local.shape[0]
+
+    global_sum = comm.allreduce(local_sum, op=MPI.SUM)
+    global_count = comm.allreduce(local_count, op=MPI.SUM)
+
+    mean = global_sum / global_count
+    local_sq_diff = ((x_train_local[:, :features] - mean) ** 2).sum(axis=0)
+    global_sq_diff = comm.allreduce(local_sq_diff, op=MPI.SUM)
+    std = np.sqrt(global_sq_diff / global_count)
+
+    # Normalize all but last column
+    x_train_local[:, :features] -= mean
+    x_train_local[:, :features] /= std
+    x_test_local[:, :features] -= mean
+    x_test_local[:, :features] /= std
+
+    return x_train_local, x_test_local, mean, std
+
+def initialize_weights(feature_count, neuron_count):
+    hidden_weights = np.random.uniform(-0.1, 0.1, (feature_count + 1, neuron_count))
+    output_weights = np.random.uniform(-0.1, 0.1, (neuron_count + 1, 1))
+
+    return hidden_weights, output_weights
+
+def compute_prediction(x, hidden_weights, output_weights, activation_id):
+
+    # Matrix multiply x with hidden weights and apply activation function
+    hidden_pre = x @ hidden_weights
+    hidden_act = activation(hidden_pre, activation_id)
+    # Add 1 for bias term
+    hidden_act = np.hstack([hidden_act, np.ones((hidden_act.shape[0], 1))])
+    # Matrix multiply activated hidden neuron outputs with output weights
+    pred = hidden_act @ output_weights
+
+    return hidden_pre, hidden_act, pred
+
+def activation(x, id):
+    if id == 0:
+        return np.maximum(0, x) # ReLU
+    elif id == 1:
+        return 1 / (1 + np.exp(-x)) # Sigmoid
+    elif id == 2:
+        return np.tanh(x) # tanh
+    else:
+        raise ValueError("Unsupported activation function")
+    
+def activation_derivative(x, id):
+    if id == 0:
+        return (x > 0).astype(float) # ReLU
+    elif id == 1:
+        sigmoid = 1 / (1 + np.exp(-x))
+        return sigmoid * (1 - sigmoid) # Sigmoid
+    elif id == 2:
+        return 1 - np.tanh(x)**2 # tanh
+    else:
+        raise ValueError("Unsupported activation function")
 
 def main():
     
@@ -99,16 +181,18 @@ def main():
     rank = comm.Get_rank()
     size = comm.Get_size()
 
-    random.seed(rank + time.time())
+    neuron_count = 10
+    feature_count = 9  # Number of features excluding bias
 
+    np.random.seed(rank + int(time.time()))
+
+    # Read and distribute data from csv
     x_train_local, y_train_local, x_test_local, y_test_local = read_csv(filename, comm, rank, size)
-    # Write the local data to CSV files
-    np.savetxt(f"x_train_local_rank_{rank}.csv", x_train_local, delimiter=",")
-    np.savetxt(f"y_train_local_rank_{rank}.csv", y_train_local, delimiter=",")
-    np.savetxt(f"x_test_local_rank_{rank}.csv", x_test_local, delimiter=",")
-    np.savetxt(f"y_test_local_rank_{rank}.csv", y_test_local, delimiter=",")
+    
+    # Normalize training data
+    x_train_local, x_test_local, mean, std = normalize_data(x_train_local, x_test_local, comm)
+
+    hidden_weights, output_weights = initialize_weights(feature_count, neuron_count)
 
 if __name__ == "__main__":
     main()
-
-print("Done")
