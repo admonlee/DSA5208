@@ -129,18 +129,32 @@ def normalize_data(x_train_local, x_test_local, comm):
     x_test_local[:, :features] -= mean
     x_test_local[:, :features] /= std
 
-    return x_train_local, x_test_local, mean, std
+    return x_train_local, x_test_local
 
-def initialize_weights(feature_count, neuron_count):
-    hidden_weights = np.random.uniform(-0.1, 0.1, (feature_count + 1, neuron_count))
-    output_weights = np.random.uniform(-0.1, 0.1, (neuron_count + 1, 1))
+def initialize_weights(feature_count, neuron_count, comm, rank):
+
+    if rank == 0:
+        # Initialize weights randomly between -0.1 and 0.1
+        hidden_weights = np.random.uniform(-0.1, 0.1, (feature_count + 1, neuron_count))
+        output_weights = np.random.uniform(-0.1, 0.1, (neuron_count + 1, 1))
+
+    else:
+        # Declare empty arrays to receive weights from root
+        hidden_weights = np.empty((feature_count + 1, neuron_count), dtype=np.float64)
+        output_weights = np.empty((neuron_count + 1, 1), dtype=np.float64)
+
+    # Broadcast weights from root
+    reqs = []
+    reqs.append(comm.Ibcast(hidden_weights, root=0))
+    reqs.append(comm.Ibcast(output_weights, root=0))
+    MPI.Request.Waitall(reqs)
 
     return hidden_weights, output_weights
 
 def compute_prediction(x, hidden_weights, output_weights, activation_id):
 
     # Matrix multiply x with hidden weights and apply activation function
-    hidden_pre = x @ hidden_weights
+    hidden_pre = x @ hidden_weights 
     hidden_act = activation(hidden_pre, activation_id)
     # Add 1 for bias term
     hidden_act = np.hstack([hidden_act, np.ones((hidden_act.shape[0], 1))])
@@ -150,6 +164,7 @@ def compute_prediction(x, hidden_weights, output_weights, activation_id):
     return hidden_pre, hidden_act, pred
 
 def activation(x, id):
+
     if id == 0:
         return np.maximum(0, x) # ReLU
     elif id == 1:
@@ -157,9 +172,10 @@ def activation(x, id):
     elif id == 2:
         return np.tanh(x) # tanh
     else:
-        raise ValueError("Unsupported activation function")
+        raise ValueError("Invalid actvation function selection")
     
 def activation_derivative(x, id):
+    
     if id == 0:
         return (x > 0).astype(float) # ReLU
     elif id == 1:
@@ -168,7 +184,35 @@ def activation_derivative(x, id):
     elif id == 2:
         return 1 - np.tanh(x)**2 # tanh
     else:
-        raise ValueError("Unsupported activation function")
+        raise ValueError("Invalid actvation function selection")
+    
+def compute_gradient(x, y, hidden_weights, output_weights, activation_id):
+    
+    batch_size = x.shape[0]
+
+    # Forward pass
+    hidden_pre, hidden_act, pred = compute_prediction(x, hidden_weights, output_weights, activation_id)
+
+    error = pred.flatten() - y
+
+    # Backpropagation
+    grad_output = hidden_act.T @ error[:, None] / batch_size     # σ * error
+    act_deriv = activation_derivative(hidden_pre, activation_id)        # σ'
+    delta_hidden = (error[:, None] @ output_weights[:-1].T) * act_deriv     # error * w_j * σ'
+    grad_hidden = x.T @ delta_hidden / batch_size       # x * (error * w_j * σ')
+
+    return grad_hidden, grad_output
+
+def update_weights(comm, hidden_weights, output_weights, grad_hidden, grad_output, learning_rate):
+
+    grad_hidden_global = comm.allreduce(grad_hidden, op=MPI.SUM) / comm.Get_size()
+    grad_output_global = comm.allreduce(grad_output, op=MPI.SUM) / comm.Get_size()
+
+    hidden_weights -= learning_rate * grad_hidden_global
+    output_weights -= learning_rate * grad_output_global
+
+    return hidden_weights, output_weights
+    
 
 def main():
     
@@ -183,6 +227,8 @@ def main():
 
     neuron_count = 10
     feature_count = 9  # Number of features excluding bias
+    M = 100 # Batch size
+    learning_rate = 0.01
 
     np.random.seed(rank + int(time.time()))
 
@@ -190,9 +236,14 @@ def main():
     x_train_local, y_train_local, x_test_local, y_test_local = read_csv(filename, comm, rank, size)
     
     # Normalize training data
-    x_train_local, x_test_local, mean, std = normalize_data(x_train_local, x_test_local, comm)
+    x_train_local, x_test_local = normalize_data(x_train_local, x_test_local, comm)
 
-    hidden_weights, output_weights = initialize_weights(feature_count, neuron_count)
+    # Initialize weights
+    hidden_weights, output_weights = initialize_weights(feature_count, neuron_count, comm, rank)
+
+    # Randomly select M rows from local training data for mini-batch
+    x_batch = x_train_local[np.random.choice(x_train_local.shape[0], M, replace=False)]
+    y_batch = y_train_local[np.random.choice(y_train_local.shape[0], M, replace=False)]
 
 if __name__ == "__main__":
     main()
