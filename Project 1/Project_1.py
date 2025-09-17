@@ -270,6 +270,7 @@ def compute_rmse(x, y, hidden_weights, output_weights, activation_id, comm):
     # Get global SSE and row count
     global_sse, global_count = compute_sse(x, y, hidden_weights, output_weights, activation_id, comm)
 
+    print(f"Global SSE: {global_sse}, Global Count: {global_count}")
     # Return RMSE
     return np.sqrt(global_sse / global_count)
 
@@ -351,33 +352,18 @@ def main():
    # Initialize weights
     hidden_weights, output_weights = initialize_weights(feature_count, neuron_count, comm, rank)
 
-#    hidden_weights, output_weights, loss_history = train_model(x_train_local, y_train_local, hidden_weights, output_weights,
-#                                                    activation_id, comm, learning_rate,
-#                                                    stopping_criterion, max_iterations, M)
+    hidden_weights, output_weights, loss_history = train_model(x_train_local, y_train_local, hidden_weights, output_weights,
+                                                    activation_id, comm, learning_rate,
+                                                    stopping_criterion, max_iterations, M)
     
     # Compute and print RMSE on training and test data
-#    train_rmse = compute_rmse(x_train_local, y_train_local, hidden_weights, output_weights, activation_id, comm)
-#    test_rmse = compute_rmse(x_test_local, y_test_local, hidden_weights, output_weights, activation_id, comm)
-#    _, _, predictions = compute_prediction(x_train_local, hidden_weights, output_weights, activation_id)
+    train_rmse = compute_rmse(x_train_local, y_train_local, hidden_weights, output_weights, activation_id, comm)
+    test_rmse = compute_rmse(x_test_local, y_test_local, hidden_weights, output_weights, activation_id, comm)
+    _, _, predictions = compute_prediction(x_train_local, hidden_weights, output_weights, activation_id)
 
-#    print(predictions.flatten())
-#    print(y_train_local)
-
-#    if rank == 0:
-#        print(f"Final Training RMSE: {train_rmse}")
-#        print(f"Final Test RMSE: {test_rmse}")
-    
     if rank == 0:
-        
-        mean_x_train = np.mean(x_train_local, axis=0)
-        mean_x_test = np.mean(x_test_local, axis=0)
-        mean_y_train = np.mean(y_train_local)
-        mean_y_test = np.mean(y_test_local)
-
-        print(f"Mean of training feature values: {mean_x_train}")
-        print(f"Mean of test feature values: {mean_x_test}")
-        print(f"Mean of training target values: {mean_y_train}")
-        print(f"Mean of test target values: {mean_y_test}")
+        print(f"Final Training RMSE: {train_rmse}")
+        print(f"Final Test RMSE: {test_rmse}")
 
 if __name__ == "__main__":
     main()
