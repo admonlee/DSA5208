@@ -131,6 +131,7 @@ def normalize_data(x_train_local, x_test_local, comm):
 
     return x_train_local, x_test_local
 
+# Initialize weights and broadcast to all processes
 def initialize_weights(feature_count, neuron_count, comm, rank):
 
     if rank == 0:
@@ -151,6 +152,7 @@ def initialize_weights(feature_count, neuron_count, comm, rank):
 
     return hidden_weights, output_weights
 
+# Forward pass to compute predictions
 def compute_prediction(x, hidden_weights, output_weights, activation_id):
 
     # Matrix multiply x with hidden weights and apply activation function
@@ -163,6 +165,7 @@ def compute_prediction(x, hidden_weights, output_weights, activation_id):
 
     return hidden_pre, hidden_act, pred
 
+# Activation functions based on user selection
 def activation(x, id):
 
     if id == 0:
@@ -174,8 +177,9 @@ def activation(x, id):
     else:
         raise ValueError("Invalid actvation function selection")
     
+# Derivatives of activation functions
 def activation_derivative(x, id):
-    
+
     if id == 0:
         return (x > 0).astype(float) # ReLU
     elif id == 1:
@@ -186,6 +190,7 @@ def activation_derivative(x, id):
     else:
         raise ValueError("Invalid actvation function selection")
     
+# Backpropagation step to compute gradient
 def compute_gradient(x, y, hidden_weights, output_weights, activation_id):
     
     batch_size = x.shape[0]
@@ -203,16 +208,81 @@ def compute_gradient(x, y, hidden_weights, output_weights, activation_id):
 
     return grad_hidden, grad_output
 
+# Update weights using averaged gradients from all processes
 def update_weights(comm, hidden_weights, output_weights, grad_hidden, grad_output, learning_rate):
 
+    # Get local gradients from all processes and calculate average
     grad_hidden_global = comm.allreduce(grad_hidden, op=MPI.SUM) / comm.Get_size()
     grad_output_global = comm.allreduce(grad_output, op=MPI.SUM) / comm.Get_size()
 
+    # Update weights using global gradients
     hidden_weights -= learning_rate * grad_hidden_global
     output_weights -= learning_rate * grad_output_global
 
     return hidden_weights, output_weights
+
+# Compute SSE, helper function for RMSE and loss
+def compute_sse(x, y, hidden_weights, output_weights, activation_id, comm):
+
+    # Compute f(x) for SSE
+    _, _, pred = compute_prediction(x, hidden_weights, output_weights, activation_id)
+
+    # Compute local SSE
+    local_sse = np.sum((pred.flatten() - y) ** 2)
+    local_count = len(y)
+
+
+    global_sse = comm.allreduce(local_sse, op=MPI.SUM)
+    global_count = comm.allreduce(local_count, op=MPI.SUM)
+
+    return global_sse, global_count
+
+# Compute RMSE for array x
+def compute_rmse(x, y, hidden_weights, output_weights, activation_id, comm):
+
+    # Get global SSE and row count
+    global_sse, global_count = compute_sse(x, y, hidden_weights, output_weights, activation_id, comm)
+
+    # Return RMSE
+    return np.sqrt(global_sse / global_count)
+
+# Compute training loss for array x
+def compute_loss(x, y, hidden_weights, output_weights, activation_id, comm):
+
+    # Get global SSE and row count
+    global_sse, global_count = compute_sse(x, y, hidden_weights, output_weights, activation_id, comm)
+
+    # Return loss
+    return 0.5 * (global_sse / global_count)
+
+# Train model using mini-batches
+def train_model(x_batch, y_batch, hidden_weights, output_weights, activation_id, comm, learning_rate,
+                stopping_criterion, max_iterations):
     
+    # Initialize stopping criteria trackers
+    loss_delta = 1e6
+    previous_loss = compute_loss(x_batch, y_batch, hidden_weights, output_weights, activation_id, comm)
+    iteration = 0
+
+    # Run gradient descent training loop until stopping criteria met
+    while loss_delta > stopping_criterion and iteration < max_iterations:
+
+        # Compute gradients and update weights
+        grad_hidden, grad_output = compute_gradient(x_batch, y_batch, hidden_weights, output_weights, activation_id)
+        hidden_weights, output_weights = update_weights(comm, hidden_weights, output_weights, grad_hidden, grad_output, learning_rate)
+       
+        # Compute current loss and loss delta
+        current_loss = compute_loss(x_batch, y_batch, hidden_weights, output_weights, activation_id, comm)
+        loss_delta = abs(previous_loss - current_loss)
+
+        # Set previous loss for next iteration
+        previous_loss = current_loss
+        iteration += 1
+
+        if comm.Get_rank() == 0:
+            print(f"Iteration {iteration}, Loss: {current_loss}, Loss Delta: {loss_delta}")
+
+    return hidden_weights, output_weights
 
 def main():
     
@@ -225,10 +295,13 @@ def main():
     rank = comm.Get_rank()
     size = comm.Get_size()
 
-    neuron_count = 10
-    feature_count = 9  # Number of features excluding bias
-    M = 100 # Batch size
-    learning_rate = 0.01
+    neuron_count = 32   # Number of neurons in hidden layer
+    feature_count = 9   # Number of features excluding bias
+    M = 100   # Batch size
+    learning_rate = 0.001
+    activation_id = 0   # 0: ReLU, 1: Sigmoid, 2: tanh
+    stopping_criterion = 1e-6
+    max_iterations = 10000
 
     np.random.seed(rank + int(time.time()))
 
@@ -244,6 +317,10 @@ def main():
     # Randomly select M rows from local training data for mini-batch
     x_batch = x_train_local[np.random.choice(x_train_local.shape[0], M, replace=False)]
     y_batch = y_train_local[np.random.choice(y_train_local.shape[0], M, replace=False)]
+
+    hidden_weights, output_weights = train_model(x_batch, y_batch, hidden_weights, output_weights,
+                                                activation_id, comm, learning_rate,
+                                                stopping_criterion, max_iterations)
 
 if __name__ == "__main__":
     main()
