@@ -1,5 +1,5 @@
 
-import csv, argparse, numpy as np, time, datetime
+import csv, argparse, numpy as np, time, datetime, matplotlib.pyplot as plt
 from mpi4py import MPI
 
 # Convert datetime string to timestamp
@@ -22,90 +22,113 @@ def read_csv(filename, comm, rank, size):
     x_test_local = []
     y_test_local = []
 
-    if rank == 0:
-        buffer = []
-        counter = 0
+    chunk = 100
+    max_reqs = 20
+    send_reqs = []
+    dest = 0
 
+    if rank == 0:
+        buffer_train = []
+        buffer_test = []
+        counter_train = 0
+        counter_test = 0
         with open(filename, 'r') as csvfile:
             filereader = csv.reader(csvfile)
             header = next(filereader)
             column_index = [header.index(feature) for feature in features]
-
+            row_idx = 0
             for row in filereader:
-                # Check for empty strings before conversion
                 if (row[column_index[0]] == '' or row[column_index[1]] == '' or
                     any(row[idx] == '' for idx in column_index[2:])):
                     continue
                 read_row = [parse_datetime(row[column_index[0]]),
                             parse_datetime(row[column_index[1]]),] + [float(row[idx]) for idx in column_index[2:]]
-                buffer.append(read_row)
-                counter += 1
-                if counter == chunk:
-                    # Convert to numpy array for efficient sending
-                    buffer_array = np.array(buffer, dtype=np.float64)
-                    if dest == rank:
-                        append_data(buffer_array, x_train_local, y_train_local, x_test_local, y_test_local)
-                    else:
-                        if len(send_reqs) >= max_reqs:
-                            MPI.Request.Waitall(send_reqs)
-                            send_reqs = []
-                        req = comm.isend(buffer_array, dest=dest, tag=0)
-                        send_reqs.append(req)
-                    dest = (dest + 1) % size
-                    # Reset buffer and counter
-                    buffer = []
-                    counter = 0
-
-            # Send remaining data in buffer at end of file
-            if buffer:
-                buffer_array = np.array(buffer, dtype=np.float64)
-                if dest == rank:
-                    append_data(buffer_array, x_train_local, y_train_local, x_test_local, y_test_local)
+                # Deterministic split: use row_idx for reproducibility
+                if row_idx % 10 < 7:  # 70% train, 30% test
+                    buffer_train.append(read_row)
+                    counter_train += 1
+                    if counter_train == chunk:
+                        buffer_array = np.array(buffer_train, dtype=np.float64)
+                        if dest == rank:
+                            append_data(buffer_array, x_train_local, y_train_local, x_test_local, y_test_local, is_train=True)
+                        else:
+                            if len(send_reqs) >= max_reqs:
+                                MPI.Request.Waitall(send_reqs)
+                                send_reqs = []
+                            req = comm.isend(buffer_array, dest=dest, tag=1)
+                            send_reqs.append(req)
+                        dest = (dest + 1) % size
+                        buffer_train = []
+                        counter_train = 0
                 else:
-                    req = comm.isend(buffer_array, dest=dest, tag=0)
-                    send_reqs.append(req)
-
-            # Send end-of-data signal (None)
-            for dest_rank in range(1, size):
-                comm.send(None, dest=dest_rank, tag=0)
-
+                    buffer_test.append(read_row)
+                    counter_test += 1
+                    if counter_test == chunk:
+                        buffer_array = np.array(buffer_test, dtype=np.float64)
+                        if dest == rank:
+                            append_data(buffer_array, x_train_local, y_train_local, x_test_local, y_test_local, is_train=False)
+                        else:
+                            if len(send_reqs) >= max_reqs:
+                                MPI.Request.Waitall(send_reqs)
+                                send_reqs = []
+                            req = comm.isend(buffer_array, dest=dest, tag=2)
+                            send_reqs.append(req)
+                        dest = (dest + 1) % size
+                        buffer_test = []
+                        counter_test = 0
+                row_idx += 1
+        # Send remaining data in buffers
+        if buffer_train:
+            buffer_array = np.array(buffer_train, dtype=np.float64)
+            if dest == rank:
+                append_data(buffer_array, x_train_local, y_train_local, x_test_local, y_test_local, is_train=True)
+            else:
+                req = comm.isend(buffer_array, dest=dest, tag=1)
+                send_reqs.append(req)
+        if buffer_test:
+            buffer_array = np.array(buffer_test, dtype=np.float64)
+            if dest == rank:
+                append_data(buffer_array, x_train_local, y_train_local, x_test_local, y_test_local, is_train=False)
+            else:
+                req = comm.isend(buffer_array, dest=dest, tag=2)
+                send_reqs.append(req)
+        # Send end-of-data signal (None) for both train and test
+        for dest_rank in range(1, size):
+            comm.send(None, dest=dest_rank, tag=1)
+            comm.send(None, dest=dest_rank, tag=2)
         if send_reqs:
             MPI.Request.Waitall(send_reqs)
-
     else:
         while True:
-            buffer_array = comm.recv(source=0, tag=0)
+            buffer_array = comm.recv(source=0, tag=1)
             if buffer_array is None:
                 break
-            append_data(buffer_array, x_train_local, y_train_local, x_test_local, y_test_local)
+            append_data(buffer_array, x_train_local, y_train_local, x_test_local, y_test_local, is_train=True)
+        while True:
+            buffer_array = comm.recv(source=0, tag=2)
+            if buffer_array is None:
+                break
+            append_data(buffer_array, x_train_local, y_train_local, x_test_local, y_test_local, is_train=False)
 
-    # Convert list of arrays to single arrays and return to main
+    # Convert lists to arrays and add bias
     X_train = np.vstack(x_train_local) if x_train_local else np.empty((0, len(features)-1))
     X_test = np.vstack(x_test_local) if x_test_local else np.empty((0, len(features)-1))
-    # Add bias column (ones) to X_train and X_test
     X_train = np.hstack([X_train, np.ones((X_train.shape[0], 1))])
     X_test = np.hstack([X_test, np.ones((X_test.shape[0], 1))])
-    return (
-        X_train,
-        np.hstack(y_train_local) if y_train_local else np.empty(0),
-        X_test,
-        np.hstack(y_test_local) if y_test_local else np.empty(0)
-    )
+    y_train = np.hstack(y_train_local) if y_train_local else np.empty(0)
+    y_test = np.hstack(y_test_local) if y_test_local else np.empty(0)
+    return X_train, y_train, X_test, y_test
 
 # Append data to local train/test sets
-def append_data(buffer_array, x_train_local, y_train_local, x_test_local, y_test_local):
-    
-    # Split into x and y
+def append_data(buffer_array, x_train_local, y_train_local, x_test_local, y_test_local, is_train):
     x = buffer_array[:, :-1]
     y = buffer_array[:, -1]
-
-    # Random mask for train/test split
-    mask = np.random.rand(len(x)) < 0.7
-
-    x_train_local.extend(x[mask])
-    y_train_local.extend(y[mask])
-    x_test_local.extend(x[~mask])
-    y_test_local.extend(y[~mask])
+    if is_train:
+        x_train_local.extend(x)
+        y_train_local.extend(y)
+    else:
+        x_test_local.extend(x)
+        y_test_local.extend(y)
 
 # Normalize training data to have zero mean and standard deviation of one
 def normalize_data(x_train_local, x_test_local, comm):
@@ -128,6 +151,10 @@ def normalize_data(x_train_local, x_test_local, comm):
     x_train_local[:, :features] /= std
     x_test_local[:, :features] -= mean
     x_test_local[:, :features] /= std
+
+    if comm.rank == 0:
+        print("Mean used:", mean)
+        print("Std used:", std)
 
     return x_train_local, x_test_local
 
@@ -256,16 +283,24 @@ def compute_loss(x, y, hidden_weights, output_weights, activation_id, comm):
     return 0.5 * (global_sse / global_count)
 
 # Train model using mini-batches
-def train_model(x_batch, y_batch, hidden_weights, output_weights, activation_id, comm, learning_rate,
-                stopping_criterion, max_iterations):
+def train_model(x, y, hidden_weights, output_weights, activation_id, comm, learning_rate,
+                stopping_criterion, max_iterations, M):
     
     # Initialize stopping criteria trackers
     loss_delta = 1e6
-    previous_loss = compute_loss(x_batch, y_batch, hidden_weights, output_weights, activation_id, comm)
+    previous_loss = compute_loss(x, y, hidden_weights, output_weights, activation_id, comm)
     iteration = 0
+
+    # Initialize loss history
+    loss_history = []
 
     # Run gradient descent training loop until stopping criteria met
     while loss_delta > stopping_criterion and iteration < max_iterations:
+
+        # Randomly select M rows from local training data for mini-batch
+        index = np.random.choice(x.shape[0], M, replace=False)
+        x_batch = x[index]
+        y_batch = y[index]
 
         # Compute gradients and update weights
         grad_hidden, grad_output = compute_gradient(x_batch, y_batch, hidden_weights, output_weights, activation_id)
@@ -281,8 +316,10 @@ def train_model(x_batch, y_batch, hidden_weights, output_weights, activation_id,
 
         if comm.Get_rank() == 0:
             print(f"Iteration {iteration}, Loss: {current_loss}, Loss Delta: {loss_delta}")
+            loss_history.append(current_loss)
 
-    return hidden_weights, output_weights
+
+    return hidden_weights, output_weights, loss_history
 
 def main():
     
@@ -297,10 +334,10 @@ def main():
 
     neuron_count = 32   # Number of neurons in hidden layer
     feature_count = 9   # Number of features excluding bias
-    M = 100   # Batch size
-    learning_rate = 0.001
+    M = 500   # Batch size
+    learning_rate = 0.00001
     activation_id = 0   # 0: ReLU, 1: Sigmoid, 2: tanh
-    stopping_criterion = 1e-6
+    stopping_criterion = 1e-5
     max_iterations = 10000
 
     np.random.seed(rank + int(time.time()))
@@ -311,16 +348,36 @@ def main():
     # Normalize training data
     x_train_local, x_test_local = normalize_data(x_train_local, x_test_local, comm)
 
-    # Initialize weights
+   # Initialize weights
     hidden_weights, output_weights = initialize_weights(feature_count, neuron_count, comm, rank)
 
-    # Randomly select M rows from local training data for mini-batch
-    x_batch = x_train_local[np.random.choice(x_train_local.shape[0], M, replace=False)]
-    y_batch = y_train_local[np.random.choice(y_train_local.shape[0], M, replace=False)]
+#    hidden_weights, output_weights, loss_history = train_model(x_train_local, y_train_local, hidden_weights, output_weights,
+#                                                    activation_id, comm, learning_rate,
+#                                                    stopping_criterion, max_iterations, M)
+    
+    # Compute and print RMSE on training and test data
+#    train_rmse = compute_rmse(x_train_local, y_train_local, hidden_weights, output_weights, activation_id, comm)
+#    test_rmse = compute_rmse(x_test_local, y_test_local, hidden_weights, output_weights, activation_id, comm)
+#    _, _, predictions = compute_prediction(x_train_local, hidden_weights, output_weights, activation_id)
 
-    hidden_weights, output_weights = train_model(x_batch, y_batch, hidden_weights, output_weights,
-                                                activation_id, comm, learning_rate,
-                                                stopping_criterion, max_iterations)
+#    print(predictions.flatten())
+#    print(y_train_local)
+
+#    if rank == 0:
+#        print(f"Final Training RMSE: {train_rmse}")
+#        print(f"Final Test RMSE: {test_rmse}")
+    
+    if rank == 0:
+        
+        mean_x_train = np.mean(x_train_local, axis=0)
+        mean_x_test = np.mean(x_test_local, axis=0)
+        mean_y_train = np.mean(y_train_local)
+        mean_y_test = np.mean(y_test_local)
+
+        print(f"Mean of training feature values: {mean_x_train}")
+        print(f"Mean of test feature values: {mean_x_test}")
+        print(f"Mean of training target values: {mean_y_train}")
+        print(f"Mean of test target values: {mean_y_test}")
 
 if __name__ == "__main__":
     main()
