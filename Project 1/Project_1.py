@@ -32,9 +32,12 @@ def read_csv(filename, comm, rank, size):
             column_index = [header.index(feature) for feature in features]
 
             for row in filereader:
-                # Check for empty strings before conversion
+                # Check for empty strings and significant outliers 
+                # (total_amount, trip_distance, extra, passenger_count)
                 if (row[column_index[0]] == '' or row[column_index[1]] == '' or
-                    any(row[idx] == '' for idx in column_index[2:])):
+                    any(row[idx] == '' for idx in column_index[2:]) or 
+                    float(row[column_index[2]]) > 10 or float(row[column_index[3]]) > 50 or 
+                    float(row[column_index[8]]) > 10 or float(row[column_index[9]]) > 200):
                     continue
                 read_row = [parse_datetime(row[column_index[0]]),
                             parse_datetime(row[column_index[1]]),] + [float(row[idx]) for idx in column_index[2:]]
@@ -287,7 +290,7 @@ def train_model(x, y, hidden_weights, output_weights, activation_id, comm, learn
         iteration += 1
 
         if comm.Get_rank() == 0:
-            print(f"Iteration {iteration}, Loss: {current_loss}, Loss Delta: {loss_delta}")
+            #print(f"Iteration {iteration}, Loss: {current_loss}, Loss Delta: {loss_delta}")
             loss_history.append(current_loss)
 
 
@@ -342,8 +345,6 @@ def main():
         plt.ylabel('Training Loss')
         plt.title('Training Loss History')
         plt.savefig('training_loss_history.png')
-    
-
 
 if __name__ == "__main__":
     main()
