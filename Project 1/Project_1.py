@@ -1,5 +1,5 @@
 
-import csv, argparse, numpy as np, time, datetime, matplotlib.pyplot as plt
+import csv, argparse, numpy as np, time, datetime
 from mpi4py import MPI
 
 # Convert datetime string to timestamp
@@ -293,6 +293,10 @@ def train_model(x, y, hidden_weights, output_weights, activation_id, comm, learn
             #print(f"Iteration {iteration}, Loss: {current_loss}, Loss Delta: {loss_delta}")
             loss_history.append(current_loss)
 
+    # Print message if model did not converge
+    if iteration == max_iterations and comm.Get_rank() == 0:
+        print("Max iterations reached.")
+
 
     return hidden_weights, output_weights, loss_history
 
@@ -300,21 +304,26 @@ def main():
     
     parser = argparse.ArgumentParser()
     parser.add_argument('filename', type=str)
+    parser.add_argument('i', type=int)  # activation function selection
+    parser.add_argument('j', type=int)  # batch size selection
     args = parser.parse_args()
     filename = args.filename
+    i = args.i
+    j = args.j
 
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     size = comm.Get_size()
 
-    neuron_count = 32   # Number of neurons in hidden layer
+    neuron_count = 16   # Number of neurons in hidden layer
     feature_count = 9   # Number of features excluding bias
-    M = 5000   # Batch size
+    M = [100, 500, 1000, 5000, 10000]   # Batch size
     learning_rate = 0.001
-    activation_id = 0   # 0: ReLU, 1: Sigmoid, 2: tanh
+    activation_id = [0, 1, 2]   # 0: ReLU, 1: Sigmoid, 2: tanh
     stopping_criterion = 1e-5
     max_iterations = 1e6
 
+    # Set random seed
     np.random.seed(rank + int(time.time()))
 
     # Read and distribute data from csv
@@ -323,28 +332,33 @@ def main():
     # Normalize training data
     x_train_local, x_test_local = normalize_data(x_train_local, x_test_local, comm)
 
-   # Initialize weights
+    # Initialize weights
     hidden_weights, output_weights = initialize_weights(feature_count, neuron_count, comm, rank)
 
-    hidden_weights, output_weights, loss_history = train_model(x_train_local, y_train_local, hidden_weights, output_weights,
-                                                    activation_id, comm, learning_rate,
-                                                    stopping_criterion, max_iterations, M)
-    
+    # Train model
+    hidden_weights, output_weights, loss_history = train_model(x_train_local, y_train_local, hidden_weights,
+                                                               output_weights, activation_id[i], comm, learning_rate,
+                                                               stopping_criterion, max_iterations, M[j])
+
     # Compute and print RMSE on training and test data
-    train_rmse = compute_rmse(x_train_local, y_train_local, hidden_weights, output_weights, activation_id, comm)
-    test_rmse = compute_rmse(x_test_local, y_test_local, hidden_weights, output_weights, activation_id, comm)
-    _, _, predictions = compute_prediction(x_train_local, hidden_weights, output_weights, activation_id)
+    train_rmse = compute_rmse(x_train_local, y_train_local, hidden_weights, output_weights, activation_id[i], comm)
+    test_rmse = compute_rmse(x_test_local, y_test_local, hidden_weights, output_weights, activation_id[i], comm)
+    _, _, predictions = compute_prediction(x_train_local, hidden_weights, output_weights, activation_id[i])
 
     if rank == 0:
-        print(f"Final Training RMSE: {train_rmse}")
-        print(f"Final Test RMSE: {test_rmse}")
-
-        # Plot training loss history
-        plt.plot(loss_history)
-        plt.xlabel('Iteration')
-        plt.ylabel('Training Loss')
-        plt.title('Training Loss History')
-        plt.savefig('training_loss_history.png')
+        
+        # Write parameters and results of run to file.
+        output_file = f"training_results_activation_{activation_id[i]}_batch_{M[j]}.txt"
+        with open(output_file, "w") as f:
+            f.write(f"Activation Function: {activation_id[i]}\n")
+            f.write(f"Batch Size: {M[j]}\n")
+            f.write(f"Train RMSE: {train_rmse}\n")
+            f.write(f"Test RMSE: {test_rmse}\n")
+            f.write("Loss History:\n")
+            for loss in loss_history:
+                f.write(f"{loss}\n")
+        
+        print(f"Results written to {output_file}")
 
 if __name__ == "__main__":
     main()
