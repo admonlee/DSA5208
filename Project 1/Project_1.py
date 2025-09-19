@@ -269,6 +269,9 @@ def train_model(x, y, hidden_weights, output_weights, activation_id, comm, learn
     # Initialize loss history
     loss_history = []
 
+    # Start timer
+    start_time = time.time()
+
     # Run gradient descent training loop until stopping criteria met
     while loss_delta > stopping_criterion and iteration < max_iterations:
 
@@ -297,19 +300,22 @@ def train_model(x, y, hidden_weights, output_weights, activation_id, comm, learn
     if iteration == max_iterations and comm.Get_rank() == 0:
         print("Max iterations reached.")
 
+    # End timer
+    end_time = time.time()
+    training_time = end_time - start_time
 
-    return hidden_weights, output_weights, loss_history
+    return hidden_weights, output_weights, loss_history, training_time
 
 def main():
     
     parser = argparse.ArgumentParser()
     parser.add_argument('filename', type=str)
     parser.add_argument('i', type=int)  # activation function selection
-    parser.add_argument('j', type=int)  # batch size selection
+    parser.add_argument('M', type=int)  # batch size selection
     args = parser.parse_args()
     filename = args.filename
     i = args.i
-    j = args.j
+    M = args.M  # Batch size
 
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
@@ -317,7 +323,6 @@ def main():
 
     neuron_count = 16   # Number of neurons in hidden layer
     feature_count = 9   # Number of features excluding bias
-    M = [100, 500, 1000, 5000, 10000]   # Batch size
     learning_rate = 0.001
     activation_id = [0, 1, 2]   # 0: ReLU, 1: Sigmoid, 2: tanh
     stopping_criterion = 1e-5
@@ -336,9 +341,9 @@ def main():
     hidden_weights, output_weights = initialize_weights(feature_count, neuron_count, comm, rank)
 
     # Train model
-    hidden_weights, output_weights, loss_history = train_model(x_train_local, y_train_local, hidden_weights,
-                                                               output_weights, activation_id[i], comm, learning_rate,
-                                                               stopping_criterion, max_iterations, M[j])
+    hidden_weights, output_weights, loss_history, training_time = train_model(x_train_local, y_train_local, hidden_weights,
+                                                                              output_weights, activation_id[i], comm, learning_rate,
+                                                                              stopping_criterion, max_iterations, M)
 
     # Compute and print RMSE on training and test data
     train_rmse = compute_rmse(x_train_local, y_train_local, hidden_weights, output_weights, activation_id[i], comm)
@@ -348,12 +353,13 @@ def main():
     if rank == 0:
         
         # Write parameters and results of run to file.
-        output_file = f"training_results_activation_{activation_id[i]}_batch_{M[j]}.txt"
+        output_file = f"training_results_activation_{activation_id[i]}_batch_{M}.txt"
         with open(output_file, "w") as f:
             f.write(f"Activation Function: {activation_id[i]}\n")
-            f.write(f"Batch Size: {M[j]}\n")
+            f.write(f"Batch Size: {M}\n")
             f.write(f"Train RMSE: {train_rmse}\n")
             f.write(f"Test RMSE: {test_rmse}\n")
+            f.write(f"Training Time: {training_time} seconds\n")
             f.write("Loss History:\n")
             for loss in loss_history:
                 f.write(f"{loss}\n")
