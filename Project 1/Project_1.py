@@ -1,3 +1,6 @@
+# DSA5208 Project 1
+# Stochastic Gradient Descent for Neural Networks using MPI
+# Admon Lee Wen Xuan (A0294691N)
 
 import csv, argparse, numpy as np, time, datetime
 from mpi4py import MPI
@@ -293,7 +296,7 @@ def train_model(x, y, hidden_weights, output_weights, activation_id, comm, learn
         iteration += 1
 
         if comm.Get_rank() == 0:
-            #print(f"Iteration {iteration}, Loss: {current_loss}, Loss Delta: {loss_delta}")
+            print(f"Iteration {iteration}, Loss: {current_loss}, Loss Delta: {loss_delta}")
             loss_history.append(current_loss)
 
     # Print message if model did not converge
@@ -312,10 +315,12 @@ def main():
     parser.add_argument('filename', type=str)
     parser.add_argument('i', type=int)  # activation function selection
     parser.add_argument('M', type=int)  # batch size selection
+    parser.add_argument('lr', type=float)  # learning rate selection
     args = parser.parse_args()
     filename = args.filename
-    i = args.i
+    i = args.i # Activation function
     M = args.M  # Batch size
+    learning_rate = args.lr  # Learning rate
 
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
@@ -323,10 +328,9 @@ def main():
 
     neuron_count = 16   # Number of neurons in hidden layer
     feature_count = 9   # Number of features excluding bias
-    learning_rate = 0.001
     activation_id = [0, 1, 2]   # 0: ReLU, 1: Sigmoid, 2: tanh
     stopping_criterion = 1e-5
-    max_iterations = 1e6
+    max_iterations = 1e5
 
     # Set random seed
     np.random.seed(rank + int(time.time()))
@@ -342,16 +346,15 @@ def main():
 
     # Train model
     hidden_weights, output_weights, loss_history, training_time = train_model(x_train_local, y_train_local, hidden_weights,
-                                                                              output_weights, activation_id[i], comm, learning_rate,
-                                                                              stopping_criterion, max_iterations, M)
+                                                                            output_weights, activation_id[i], comm, learning_rate,
+                                                                            stopping_criterion, max_iterations, M)
 
     # Compute and print RMSE on training and test data
     train_rmse = compute_rmse(x_train_local, y_train_local, hidden_weights, output_weights, activation_id[i], comm)
     test_rmse = compute_rmse(x_test_local, y_test_local, hidden_weights, output_weights, activation_id[i], comm)
-    _, _, predictions = compute_prediction(x_train_local, hidden_weights, output_weights, activation_id[i])
 
     if rank == 0:
-        
+            
         # Write parameters and results of run to file.
         output_file = f"training_results_activation_{activation_id[i]}_batch_{M}.txt"
         with open(output_file, "w") as f:
@@ -363,7 +366,7 @@ def main():
             f.write("Loss History:\n")
             for loss in loss_history:
                 f.write(f"{loss}\n")
-        
+            
         print(f"Results written to {output_file}")
 
 if __name__ == "__main__":
