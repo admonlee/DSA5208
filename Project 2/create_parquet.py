@@ -57,7 +57,7 @@ mask = (
     ((F.col('WND_3') > 900) & (F.col('WND_3') != 9999)) |
     (F.col('WND_3') < 0) | (F.col('WND_4').isin(['3', '7'])) |
     ~(F.col('CIG_3').isin(['N', 'Y', '9'])) |
-    ~(F.col('VIS_2').isin(['N', 'Y', '9'])) |
+    ~(F.col('VIS_2').isin(['N', 'V', '9'])) |
     (F.col('VIS_3').isin(['3', '7'])) |
     (F.col('DEW_0') <= -932) | ((F.col('DEW_0') >= 368) & (F.col('DEW_0') != 9999))
 )
@@ -79,7 +79,7 @@ df = df.select(
     # One hot encoding
     F.when(F.col('CIG_3')=='Y', 1).otherwise(0).alias('CIG_3_Y'),
     F.when(F.col('CIG_3')=='9', 1).otherwise(0).alias('CIG_3_9'),
-    F.when(F.col('VIS_2')=='Y', 1).otherwise(0).alias('VIS_2_Y'),
+    F.when(F.col('VIS_2')=='V', 1).otherwise(0).alias('VIS_2_V'),
     F.when(F.col('VIS_2')=='9', 1).otherwise(0).alias('VIS_2_9'),
     F.when(F.col('WND_0') == 999, 1).otherwise(0).alias('WND_0_UNDETERMINED'),
     
