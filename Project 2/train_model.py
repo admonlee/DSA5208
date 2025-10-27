@@ -1,3 +1,9 @@
+# DSA5208 Project 2
+# Machine Learning on Weather Data
+# Admon Lee Wen Xuan (A0294691N)
+
+# Pyspark script to train ML models on weather data stored in Parquet format.
+
 from pyspark.sql import SparkSession, functions as F
 from pyspark.ml.regression import LinearRegression, GBTRegressor
 from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
@@ -175,8 +181,8 @@ gbt = GBTRegressor(seed = 42).setFeaturesCol('features').setLabelCol('TMP_0')
 
 # Create parameter grid for hyperparameter tuning
 params = ParamGridBuilder().\
-    addGrid(gbt.maxDepth, [2, 5, 7]).\
-    addGrid(gbt.maxIter, [20, 50]).\
+    addGrid(gbt.maxDepth, [2, 5, 10]).\
+    addGrid(gbt.maxIter, [20, 100]).\
     addGrid(gbt.stepSize, [0.05, 0.1, 0.2]).\
     addGrid(gbt.subsamplingRate, [0.8, 1.0]).\
     addGrid(gbt.minInstancesPerNode, [2, 5]).\
@@ -275,7 +281,7 @@ blob = bucket.blob(destination_blob_name)
 blob.upload_from_filename(source_file_name)
 
 # Export model
-gbt_best_model.write().overwrite().save('gs://dsa5208-project-2/gbt_model')
+gbt_best_model.stages[-1].write().overwrite().save('gs://dsa5208-project-2/gbt_model')
 
 # Write results to text file
 with open('/tmp/gbt_results.txt', 'w') as f:

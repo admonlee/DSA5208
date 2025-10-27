@@ -1,3 +1,7 @@
+# DSA5208 Project 2
+# Machine Learning on Weather Data
+# Admon Lee Wen Xuan (A0294691N)
+
 # Pyspark script to read extracted CSV files, clean and standardise data,
 # and write to Parquet format for ML model training.
 
